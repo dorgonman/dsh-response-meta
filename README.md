@@ -29,8 +29,11 @@ deepseek-v4-pro · 思考 1.5k 字
   final provider usage replaces the estimate when the reply completes.
 - **Reasoning extent** prefers provider-reported reasoning tokens and falls
   back to the reasoning text length.
-- **Tokens/s** is output tokens divided by decode time, from first token to
-  message completion, matching DSH's native timing semantics.
+- **Tokens/s** is this message's provider output tokens divided by its model
+  phase, from step start to message completion. It includes TTFT and excludes
+  later tool execution. Live and interrupted estimates use streamed characters
+  over the same phase, ending at the latest token until completion is known.
+  Missing or invalid step boundaries omit the rate; turn timing is never used.
 - **Timestamp** shows `HH:mm` for today's replies and includes the date for
   older replies.
 - **Total runtime** spans the whole turn; **TTFT** spans the current step from
@@ -44,6 +47,9 @@ deepseek-v4-pro · 思考 1.5k 字
 ## Requirements
 
 DSH `0.1.5-rc.1` with a Web profile. Version `0.4.0` handles transient `assistant/live-chunk` events and the packed streams embedded in durable messages and interrupted attempts. It reconstructs reasoning counts and token timing after a cold load, and preserves completed throughput and TTFT when the host retires transient chunks. Settlement replaces transient counters to avoid double counting. Keep plugin `0.3.0` with DSH `0.1.2-rc.1`, and `0.2.1` with older DSH installations.
+
+Kano `0.4.1-kano.1` uses the full model phase for throughput so batched or
+instantaneous first-to-last-token delivery cannot inflate the reported rate.
 
 ## Install
 

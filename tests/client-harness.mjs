@@ -54,10 +54,20 @@ assert(api.inject.includes("slots") && api.inject.includes("locale"), "client in
 assert(api.compactNumber(34) === "34", `compactNumber(34), got ${api.compactNumber(34)}`);
 assert(api.compactNumber(1234) === "1.2k", `compactNumber(1234), got ${api.compactNumber(1234)}`);
 assert(api.compactNumber(12034) === "12k", `compactNumber(12034), got ${api.compactNumber(12034)}`);
-assert(api.decodeMsOf({ firstTokenTime: 1000, completedTime: 21000 }) === 20000, "decodeMsOf delta");
-assert(api.decodeMsOf({ firstTokenTime: null, completedTime: 21000 }) === null, "decodeMsOf null first token");
+assert(api.modelMsOf({ stepStartTime: 1000, firstTokenTime: 20998, completedTime: 21000 }) === 20000, "modelMsOf includes first-token latency");
+assert(api.modelMsOf({ stepStartTime: 1000, completedTime: 21000 }) === 20000, "modelMsOf does not require the first token");
+for (const stepStartTime of [undefined, null, NaN, Infinity, -1, 21000, 22000]) {
+	assert(api.modelMsOf({ stepStartTime, completedTime: 21000 }) === null, `modelMsOf rejects invalid start ${String(stepStartTime)}`);
+}
+for (const completedTime of [undefined, null, NaN, Infinity, -1, 1000, 0]) {
+	assert(api.modelMsOf({ stepStartTime: 1000, completedTime }) === null, `modelMsOf rejects invalid completion ${String(completedTime)}`);
+}
 assert(api.tokensPerSecond(680, 20000) === 34, "tokensPerSecond 680/20s");
 assert(api.tokensPerSecond(null, 20000) === null && api.tokensPerSecond(680, 0) === null, "tokensPerSecond null guards");
+for (const invalid of [undefined, NaN, Infinity, -1]) {
+	assert(api.tokensPerSecond(invalid, 20000) === null && api.tokensPerSecond(680, invalid) === null, `tokensPerSecond rejects invalid input ${String(invalid)}`);
+}
+assert(api.tokensPerSecond(Number.MAX_VALUE, Number.MIN_VALUE) === null, "tokensPerSecond omits overflowing rates");
 assert(api.reasoningCharsOf([{ kind: "reasoning", text: "abc" }, { kind: "text", text: "x" }]) === 3, "reasoningCharsOf counts reasoning blocks only");
 assert(api.outputTokensOf({ outputTokens: 42 }) === 42 && api.outputTokensOf(null) === null, "outputTokensOf guards");
 
@@ -88,6 +98,7 @@ const node = {
 	kind: "assistant",
 	messageId: "m1",
 	turn: 3,
+	step: 1,
 	blocks: [{ kind: "reasoning", text: "repeated".repeat(10) }],
 	usage: { outputTokens: 680, reasoningTokens: 400 },
 	timing: { stepStartTime: stepStartAt, firstTokenTime: firstTokenAt, completedTime: completedAt }
@@ -98,7 +109,14 @@ assert(api.formatLatencySeconds(2_100) === "2.1", "formatLatencySeconds mirrors 
 assert(api.formatMessageClock(completedAt, t, referenceNow) === "14:16", "formatMessageClock keeps today's timestamp compact");
 
 const full = api.deriveReadout(node, "deepseek-v4-flash", t, { turnTiming, now: referenceNow });
-assert(full === "deepseek-v4-flash · 思考 400 tok · 34 tok/s · 14:16 · 用时 2分24秒 · 首 token 2.1秒", `full readout, got ${JSON.stringify(full)}`);
+assert(full === "deepseek-v4-flash · 思考 400 tok · 31 tok/s · 14:16 · 用时 2分24秒 · 首 token 2.1秒", `full readout, got ${JSON.stringify(full)}`);
+
+// A 35-second wait followed by a 2 ms delivery must not report 175500 tok/s.
+const batchedNode = { ...node, usage: { outputTokens: 351 }, timing: { stepStartTime: 1000, firstTokenTime: 36000, completedTime: 36002 } };
+const batched = api.deriveReadout(batchedNode, "batched", t, { turnTiming: { startTime: 0, endTime: 221000 } });
+assert(batched.split(" · ").includes("10 tok/s"), `batched readout includes TTFT, got ${batched}`);
+assert(api.deriveReadout({ ...batchedNode, timing: { ...batchedNode.timing, firstTokenTime: null } }, "batched", t).split(" · ").includes("10 tok/s"), "completed rate survives missing first-token timing");
+assert(!api.deriveReadout({ ...batchedNode, timing: { firstTokenTime: 36000, completedTime: 36002 } }, "batched", t, { turnTiming }).includes("tok/s"), "missing step start never falls back to turn timing");
 
 const noTokens = api.deriveReadout({ ...node, usage: undefined }, "deepseek-v4-flash", t, { turnTiming, now: referenceNow });
 assert(noTokens === "deepseek-v4-flash · 思考 80 字 · 14:16 · 用时 2分24秒 · 首 token 2.1秒", `chars fallback readout, got ${JSON.stringify(noTokens)}`);
@@ -172,7 +190,7 @@ try {
 }
 assert(render !== null && render.type === "span", "component renders a span when data exists");
 assert(render.props["data-dsh-response-meta"] === "complete", "completed readout is tagged separately from aborted rows");
-assert(render.props.children === "deepseek-v4-flash · 思考 400 tok · 34 tok/s · 14:16 · 用时 2分24秒 · 首 token 2.1秒", `rendered readout, got ${JSON.stringify(render.props.children)}`);
+assert(render.props.children === "deepseek-v4-flash · 思考 400 tok · 31 tok/s · 14:16 · 用时 2分24秒 · 首 token 2.1秒", `rendered readout, got ${JSON.stringify(render.props.children)}`);
 
 const v3Render = component({
   messageId: "m1",
@@ -182,7 +200,21 @@ const v3Render = component({
   }),
   useProjection: () => ({ byTurn: { "3": { model: "deepseek-v4-flash" } } }), t,
 });
-assert(v3Render.props.children.includes("34 tok/s") && v3Render.props.children.includes("首 token 2.1秒"), "completed V3 readout uses settled stream timing after native transient retirement");
+assert(v3Render.props.children.split(" · ").includes("31 tok/s") && v3Render.props.children.split(" · ").includes("首 token 2.1秒"), "completed V3 readout uses settled stream timing after native transient retirement");
+
+const multiStepRender = component({
+	messageId: "m1",
+	useChat: selector => selector({
+		legacy: { nodes: [
+			{ ...node, messageId: "other-step", step: 2, usage: { outputTokens: 10000 }, timing: { stepStartTime: completedAt, completedTime: completedAt + 1000 } },
+			batchedNode,
+		], turnTimings: new Map([[3, turnTiming]]) },
+		nodes: { values: () => [{ kind: "dsh-response-meta-aborted", data: { turn: 3, step: 2, firstTokenTime: 1 } }] },
+	}),
+	useProjection: () => ({ byTurn: { "3": { model: "batched" } } }), t,
+});
+assert(multiStepRender.props.children.split(" · ").includes("10 tok/s"), "completed rate uses only the selected message's usage and step duration");
+assert(multiStepRender.props.children.includes("首 token 35秒"), "another step's settled timing cannot replace this message's first token");
 
 const blank = component({
 	messageId: "m2",
@@ -226,6 +258,7 @@ assert(abortedNode !== null, "aborted step materializes its node");
 assert(abortedNode.kind === "dsh-response-meta-aborted" && abortedNode.target === "chat" && abortedNode.anchorSeq === 14, `aborted node shape, got ${JSON.stringify(abortedNode)}`);
 assert(abortedNode.data.turn === 1 && abortedNode.data.step === 1 && abortedNode.data.reasoningChars === 11 && abortedNode.data.totalChars === 11, `aborted node data, got ${JSON.stringify(abortedNode.data)}`);
 assert(abortedNode.data.firstTokenTime === 2000 && abortedNode.data.lastTokenTime === 3000 && abortedNode.data.outputTokens === null, `aborted node timing, got ${JSON.stringify(abortedNode.data)}`);
+assert(abortedNode.data.stepStartTime === 1000, "incremental node retains its matching step start rather than the later step/end time");
 assert(abortedNode.visibility === "visible", "aborted node is visible");
 
 // A text-finalized step hides the already-published live row (its answer has
@@ -287,31 +320,45 @@ const abortedComponent = nodeEntry.component;
 // The same keyed row is live before completion, distinguished semantically
 // while reusing the incremental readout math.
 const liveRender = abortedComponent({
-	node: { data: { status: "running", turn: 5, step: 1, reasoningChars: 80, totalChars: 80, outputTokens: null, reasoningTokens: null, firstTokenTime: 1000, lastTokenTime: 5000, messageTime: null } },
+	node: { data: { status: "running", turn: 5, step: 1, stepStartTime: 0, reasoningChars: 80, totalChars: 80, outputTokens: null, reasoningTokens: null, firstTokenTime: 1000, lastTokenTime: 5000, messageTime: null } },
 	useProjection: () => ({ byTurn: { "5": { model: "deepseek-v4-pro" } } }),
 	t
 });
 assert(liveRender !== null && liveRender.props["data-dsh-response-meta"] === "live", `running component must expose the live marker, got ${JSON.stringify(liveRender)}`);
-assert(liveRender.props.children.props.children === "deepseek-v4-pro · 思考 80 字 · ~5 tok/s", `live readout, got ${JSON.stringify(liveRender.props.children.props.children)}`);
+assert(liveRender.props.children.props.children === "deepseek-v4-pro · 思考 80 字 · ~4 tok/s", `live readout, got ${JSON.stringify(liveRender.props.children.props.children)}`);
 
 // Chunked abort without usage: estimated reasoning toks/s (80 chars / 4 = 20
-// tokens over 4s = 5 tok/s), shown with the ~ marker.
+// tokens over the 5s model phase = 4 tok/s), shown with the ~ marker.
 const abortedRender = abortedComponent({
-	node: { data: { status: "aborted", turn: 5, step: 1, reasoningChars: 80, totalChars: 80, outputTokens: null, reasoningTokens: null, firstTokenTime: 1000, lastTokenTime: 5000, messageTime: null } },
+	node: { data: { status: "aborted", turn: 5, step: 1, stepStartTime: 0, reasoningChars: 80, totalChars: 80, outputTokens: null, reasoningTokens: null, firstTokenTime: 1000, lastTokenTime: 5000, messageTime: null } },
 	useProjection: () => ({ byTurn: { "5": { model: "deepseek-v4-pro" } } }),
 	t
 });
 assert(abortedRender !== null && abortedRender.type === "div", "aborted component renders a row");
 assert(abortedRender.props["data-dsh-response-meta"] === "aborted", "aborted readout tagged");
-assert(abortedRender.props.children.props.children === "deepseek-v4-pro · 思考 80 字 · ~5 tok/s", `estimated aborted readout, got ${JSON.stringify(abortedRender.props.children.props.children)}`);
+assert(abortedRender.props.children.props.children === "deepseek-v4-pro · 思考 80 字 · ~4 tok/s", `estimated aborted readout, got ${JSON.stringify(abortedRender.props.children.props.children)}`);
 
 // Finalization race: real provider usage → real toks/s (40 tokens over 20s).
 const racedRender = abortedComponent({
-	node: { data: { turn: 5, step: 1, reasoningChars: 7, totalChars: 7, outputTokens: 40, reasoningTokens: 30, firstTokenTime: 1000, lastTokenTime: 1500, messageTime: 21000 } },
+	node: { data: { turn: 5, step: 1, stepStartTime: 1000, reasoningChars: 7, totalChars: 7, outputTokens: 40, reasoningTokens: 30, firstTokenTime: 1000, lastTokenTime: 1500, messageTime: 21000 } },
 	useProjection: () => ({ byTurn: { "5": { model: "deepseek-v4-pro" } } }),
 	t
 });
 assert(racedRender.props.children.props.children === "deepseek-v4-pro · 思考 30 tok · 2 tok/s", `raced readout, got ${JSON.stringify(racedRender.props.children.props.children)}`);
+
+const partialData = { turn: 5, step: 1, stepStartTime: 1000, reasoningChars: 1404, totalChars: 1404, outputTokens: 351, firstTokenTime: 36000, lastTokenTime: 36002, messageTime: 36002 };
+assert(api.abortedReadout(partialData, {}, t).split(" · ").includes("10 tok/s"), "interrupted provider rate includes TTFT");
+assert(api.abortedReadout({ ...partialData, firstTokenTime: null }, {}, t).split(" · ").includes("10 tok/s"), "interrupted provider rate does not require first-token timing");
+assert(api.abortedReadout({ ...partialData, outputTokens: null, messageTime: null, firstTokenTime: null }, {}, t).split(" · ").includes("~10 tok/s"), "live estimated rate includes the full observed model phase");
+assert(api.abortedReadout({ ...partialData, outputTokens: null, lastTokenTime: 36000, messageTime: 71200 }, {}, t).split(" · ").includes("~5 tok/s"), "settled estimates include the remainder of the model phase");
+for (const stepStartTime of [undefined, null, NaN, Infinity, 36002, 37000]) {
+	for (const outputTokens of [351, null]) {
+		assert(!api.abortedReadout({ ...partialData, stepStartTime, outputTokens }, {}, t).includes("tok/s"), `incremental rate omits invalid phase ${String(stepStartTime)}`);
+	}
+}
+for (const messageTime of [null, NaN, Infinity, 1000, 0]) {
+	assert(!api.abortedReadout({ ...partialData, messageTime }, {}, t).includes("tok/s"), "provider usage with invalid completion never falls back to an estimated token-span rate");
+}
 
 // Stop before the first token: model-only line still renders.
 const earlyStop = abortedComponent({

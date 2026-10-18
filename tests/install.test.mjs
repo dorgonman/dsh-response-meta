@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const installer = fileURLToPath(new URL('../scripts/install.sh', import.meta.url));
+const shellPath = path => process.platform === 'win32'
+  ? path.replaceAll('\\', '/').replace(/^([a-zA-Z]):/, (_, drive) => '/' + drive.toLowerCase())
+  : path;
 async function install(args, overrides = {}) {
   const temp = await mkdtemp(join(tmpdir(), 'dsh-meta-install-'));
   try {
@@ -26,10 +29,11 @@ async function install(args, overrides = {}) {
     // Guard the real awk boundary: even a regressed installer cannot read an
     // existing profile. The parser itself runs only on synthetic fixtures.
     await writeFile(join(bin, 'awk'), '#!/bin/sh\n[ -n "$DSH_HOME" ] || exit 0\nfor arg do last="$arg"; done\ncase "$last" in "$DSH_HOME"/*) exec /usr/bin/awk "$@" ;; *) exit 0 ;; esac\n', { mode: 0o755 });
-    const result = spawnSync('/bin/sh', [installer, ...args], { encoding: 'utf8', cwd: temp,
-      env: { ...process.env, PATH: bin + ':' + process.env.PATH, DSH_HOME: dshHome,
+    const result = spawnSync(process.platform === 'win32' ? 'sh' : '/bin/sh', [shellPath(installer), ...args], { encoding: 'utf8', cwd: temp,
+      env: { ...process.env, PATH: bin + delimiter + process.env.PATH, DSH_HOME: shellPath(dshHome),
         DSH_PROFILE: '', DSH_TEST_CALLS: calls, DSH_TEST_FALLBACK_STORE: join(temp, 'fallback'), ...overrides },
     });
+    assert.ifError(result.error);
     const invocations = (await readFile(calls, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse);
     return { ...result, invocations, store };
   } finally { await rm(temp, { recursive: true, force: true }); }

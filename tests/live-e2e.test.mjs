@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const script = fileURLToPath(new URL('./live-e2e.mjs', import.meta.url));
 const event = (type, data) => ({ event: { type, data } });
@@ -45,7 +45,7 @@ async function run(snapshots, envOverrides = {}) {
       const realTimeout = globalThis.setTimeout;
       globalThis.setTimeout = (fn) => realTimeout(fn, 0);
     `);
-    const result = spawnSync(process.execPath, ['--import', preload, script, 'http://127.0.0.1:33881'], {
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, script, 'http://127.0.0.1:33881'], {
       encoding: 'utf8', timeout: 10000, cwd: workspace,
       env: { ...process.env, DSH_HOME: dshHome, DSH_PROFILE: profile,
         DSH_TEST_IDENTITY: identity, DSH_TEST_SNAPSHOTS: JSON.stringify(snapshots),
